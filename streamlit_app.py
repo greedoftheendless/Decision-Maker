@@ -1,124 +1,111 @@
 import streamlit as st
 import pandas as pd
-from shared.data_reader import read_dataset
+import numpy as np
+import io
 
-st.set_page_config(page_title="🖱️ Mouse Decision Maker", layout="wide")
-st.title("🖱️ Mouse Decision Maker")
+st.title("Data Cleaning App")
 
-# Session state initialization
-if "show_filters" not in st.session_state:
-    st.session_state.show_filters = True
-if "filters_applied" not in st.session_state:
-    st.session_state.filters_applied = False
-if "type_option" not in st.session_state:
-    st.session_state.type_option = ""
-if "wired_checked" not in st.session_state:
-    st.session_state.wired_checked = False
-if "wireless_checked" not in st.session_state:
-    st.session_state.wireless_checked = False
-if "selected_brands" not in st.session_state:
-    st.session_state.selected_brands = []
-if "selected_mouse_names" not in st.session_state:
-    st.session_state.selected_mouse_names = []
+uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xls", "xlsx"])
 
-# Helper function to find relevant column by keywords
-def find_column(df_columns, keywords):
-    lowered = [c.lower() for c in df_columns]
-    for kw in keywords:
-        for col, col_low in zip(df_columns, lowered):
-            if kw in col_low:
-                return col
-    return None
+if uploaded_file is not None:
+    try:
+        filename = uploaded_file.name
+        file_format = ''
+        df = None  # Initialize df to None
 
-uploaded_file = st.file_uploader("Upload your dataset (CSV, XLS, XLSX)", type=["csv", "xls", "xlsx"])
+        if filename.endswith('.csv'):
+            # Read as string to handle potential encoding issues and then parse
+            stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+            # Attempt to read with semicolon delimiter first
+            try:
+                df = pd.read_csv(stringio, sep=';')
+                file_format = 'CSV'
+                st.success(f"File loaded with semicolon delimiter! Format: {file_format}")
+            except Exception as e_semicolon:
+                st.warning(f"Could not read with semicolon delimiter: {e_semicolon}. Trying comma delimiter...")
+                stringio.seek(0)  # Reset stream position
+                try:
+                    df = pd.read_csv(stringio, sep=',')
+                    file_format = 'CSV'
+                    st.success(f"File loaded with comma delimiter! Format: {file_format}")
+                except Exception as e_comma:
+                    st.error(f"Could not read with comma delimiter either: {e_comma}")
+                    df = None  # Ensure df is None if reading fails
 
-if uploaded_file:
-    df, file_format, encoding, error = read_dataset(uploaded_file)
+        elif filename.endswith('.xls') or filename.endswith('.xlsx'):
+            df = pd.read_excel(uploaded_file, header=0)
+            file_format = 'Excel'
+            st.success(f"File loaded! Format: {file_format}")
+        else:
+            st.error("Unsupported file format.")
+            df = None
 
-    if error:
-        st.error(f"Error reading file: {error}")
-    elif df is not None:
-        st.success(f"File loaded! Format: {file_format}, Encoding: {encoding}")
+        if df is not None:
+            # Handle semi-colon separated single column if still one column after initial read (only for CSV)
+            if file_format == 'CSV' and df.shape[1] == 1 and ';' in uploaded_file.getvalue().decode("utf-8"):
+                st.warning("CSV read as a single column, attempting to split with semicolon...")
+                stringio.seek(0)  # Reset stream position
+                # Read again, this time splitting the single column
+                df = pd.read_csv(stringio, sep=';', header=None)  # Read without header initially for splitting
 
-        # Detect columns dynamically
-        brand_col = find_column(df.columns, ["brand", "company", "manufacturer", "make", "vendor"])
-        mouse_name_col = find_column(df.columns, ["name", "mouse name", "product", "model"])
-        type_col = find_column(df.columns, ["type", "category", "usage", "purpose"])
+            # Fix headers if unnamed - this step is crucial after potential splitting
+            if any(str(col).startswith("Unnamed") for col in df.columns):
+                st.warning("Unnamed columns detected, attempting to fix headers...")
+                new_headers = df.iloc[0]
+                df = df[1:].reset_index(drop=True)
+                df.columns = new_headers
 
-        # Ensure these columns exist with fallback values so filters work without errors
-        if brand_col not in df.columns:
-            df["Brand"] = "Unknown"
-            brand_col = "Brand"
-        if mouse_name_col not in df.columns:
-            df["Mouse Name"] = "Unknown"
-            mouse_name_col = "Mouse Name"
-        if type_col not in df.columns:
-            df["Type"] = "Unknown"
-            type_col = "Type"
+            df.columns = df.columns.astype(str).str.strip()
 
-        if st.button("🎛️ Filters"):
-            st.session_state.show_filters = not st.session_state.show_filters
+            # Treat '-', '_', and blank strings as missing
+            df.replace(['-', '_', ' '], np.nan, inplace=True)
 
-        if st.session_state.show_filters:
-            st.subheader("🧩 Choose Mouse Preferences")
-            col1, col2, col3, col4 = st.columns([3, 3, 2, 2])
+            # Drop rows with any missing data
+            initial_rows = len(df)
+            df.dropna(how='any', inplace=True)
+            rows_dropped_empty = initial_rows - len(df)
+            if rows_dropped_empty > 0:
+                st.write(f"Dropped {rows_dropped_empty} rows with missing or junk values.")
 
-            with col1:
-                brands = df[brand_col].dropna().unique().tolist()
-                selected_brands = st.multiselect("Brand", options=brands, default=st.session_state.selected_brands)
-                st.session_state.selected_brands = selected_brands
+            # Drop duplicate rows
+            initial_rows = len(df)
+            df = df[~df.duplicated(keep='first')].reset_index(drop=True)
+            rows_dropped_duplicates = initial_rows - len(df)
+            if rows_dropped_duplicates > 0:
+                st.write(f"Dropped {rows_dropped_duplicates} duplicate rows.")
 
-            with col2:
-                mouse_names = df[mouse_name_col].dropna().unique().tolist()
-                selected_mouse_names = st.multiselect("Mouse Name", options=mouse_names, default=st.session_state.selected_mouse_names)
-                st.session_state.selected_mouse_names = selected_mouse_names
+            # Rename dimension columns
+            unit_cols = {
+                "Length": "Length (mm)",
+                "Width": "Width (mm)",
+                "Height": "Height (mm)",
+                "Weight": "Weight (g)"
+            }
+            for old, new in unit_cols.items():
+                if old in df.columns:
+                    df.rename(columns={old: new}, inplace=True)
 
-            with col3:
-                mouse_types = ["", "Gaming", "Normal", "Design/Edit"]
-                selected_type = st.selectbox("Mouse Type", options=mouse_types, index=mouse_types.index(st.session_state.type_option) if st.session_state.type_option in mouse_types else 0)
-                st.session_state.type_option = selected_type
+            # Improved conversion function
+            def convert_cm_to_mm(value):
+                try:
+                    value = str(value).lower().strip()
+                    if "cm" in value:
+                        return float(value.replace("cm", "").strip()) * 10
+                    elif "mm" in value:
+                        return float(value.replace("mm", "").strip())
+                    else:
+                        # Assume mm if unit is not given
+                        return float(value)
+                except:
+                    return np.nan
 
-            with col4:
-                st.markdown("### Choose wire type")
-                wired_checked = st.checkbox("Wired", value=st.session_state.wired_checked)
-                wireless_checked = st.checkbox("Wireless", value=st.session_state.wireless_checked)
-                st.session_state.wired_checked = wired_checked
-                st.session_state.wireless_checked = wireless_checked
+            # Apply conversion to applicable columns
+            for col in ["Length (mm)", "Width (mm)", "Height (mm)"]:
+                if col in df.columns:
+                    df[col] = df[col].apply(convert_cm_to_mm)
 
-            if st.button("Go"):
-                st.session_state.filters_applied = True
-                st.session_state.show_filters = False
+            st.subheader("Cleaned & Final Table:")
+            st.dataframe(df)
 
-        if st.session_state.filters_applied:
-            st.subheader("🎯 Results")
-            filtered_df = df.copy()
-
-            # Apply filters if selected
-            if st.session_state.selected_brands:
-                filtered_df = filtered_df[filtered_df[brand_col].isin(st.session_state.selected_brands)]
-
-            if st.session_state.selected_mouse_names:
-                filtered_df = filtered_df[filtered_df[mouse_name_col].isin(st.session_state.selected_mouse_names)]
-
-            if st.session_state.type_option and st.session_state.type_option != "":
-                filtered_df = filtered_df[filtered_df[type_col] == st.session_state.type_option]
-
-            # Wired/Wireless filter
-            if st.session_state.wired_checked or st.session_state.wireless_checked:
-                wire_mask = pd.Series([False] * len(filtered_df))
-                # Check wired
-                if st.session_state.wired_checked:
-                    wire_mask = wire_mask | filtered_df.apply(lambda row: row.astype(str).str.lower().str.contains("wired").any(), axis=1)
-                # Check wireless
-                if st.session_state.wireless_checked:
-                    wire_mask = wire_mask | filtered_df.apply(lambda row: row.astype(str).str.lower().str.contains("wireless").any(), axis=1)
-                filtered_df = filtered_df[wire_mask]
-
-            styled_df = filtered_df.reset_index(drop=True).style.set_table_styles([
-                {'selector': 'th, td',
-                 'props': [('border', '1px solid #ccc'),
-                           ('padding', '6px'),
-                           ('text-align', 'left')]}
-            ]).set_properties(**{'border-collapse': 'collapse'})
-
-            st.dataframe(styled_df, use_container_width=True)
+    except Exception as e:
+        st.error(f"An error occurred during file processing: {e}")
