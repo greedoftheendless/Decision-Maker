@@ -3,109 +3,120 @@ import pandas as pd
 import numpy as np
 import io
 
-st.title("Data Cleaning App")
+st.set_page_config(page_title="🧼 Data Cleaner & Classifier", layout="wide")
+st.title("🧼 Mouse Data Cleaner & Classifier")
 
-uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xls", "xlsx"])
+uploaded_file = st.file_uploader("Upload your dataset (CSV, XLS, XLSX)", type=["csv", "xls", "xlsx"])
 
-if uploaded_file is not None:
+if uploaded_file:
     try:
         filename = uploaded_file.name
-        file_format = ''
-        df = None  # Initialize df to None
+        df = None
 
         if filename.endswith('.csv'):
-            # Read as string to handle potential encoding issues and then parse
             stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-            # Attempt to read with semicolon delimiter first
             try:
                 df = pd.read_csv(stringio, sep=';')
-                file_format = 'CSV'
-                st.success(f"File loaded with semicolon delimiter! Format: {file_format}")
-            except Exception as e_semicolon:
-                st.warning(f"Could not read with semicolon delimiter: {e_semicolon}. Trying comma delimiter...")
-                stringio.seek(0)  # Reset stream position
-                try:
-                    df = pd.read_csv(stringio, sep=',')
-                    file_format = 'CSV'
-                    st.success(f"File loaded with comma delimiter! Format: {file_format}")
-                except Exception as e_comma:
-                    st.error(f"Could not read with comma delimiter either: {e_comma}")
-                    df = None  # Ensure df is None if reading fails
-
-        elif filename.endswith('.xls') or filename.endswith('.xlsx'):
-            df = pd.read_excel(uploaded_file, header=0)
+                file_format = 'CSV (semicolon)'
+            except:
+                stringio.seek(0)
+                df = pd.read_csv(stringio, sep=',')
+                file_format = 'CSV (comma)'
+        elif filename.endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(uploaded_file)
             file_format = 'Excel'
-            st.success(f"File loaded! Format: {file_format}")
         else:
             st.error("Unsupported file format.")
-            df = None
 
         if df is not None:
-            # Handle semi-colon separated single column if still one column after initial read (only for CSV)
-            if file_format == 'CSV' and df.shape[1] == 1 and ';' in uploaded_file.getvalue().decode("utf-8"):
-                st.warning("CSV read as a single column, attempting to split with semicolon...")
-                stringio.seek(0)  # Reset stream position
-                # Read again, this time splitting the single column
-                df = pd.read_csv(stringio, sep=';', header=None)  # Read without header initially for splitting
+            st.success(f"✅ File loaded! Format: {file_format}")
 
-            # Fix headers if unnamed - this step is crucial after potential splitting
+            if df.shape[1] == 1 and ';' in uploaded_file.getvalue().decode("utf-8"):
+                stringio.seek(0)
+                df = pd.read_csv(stringio, sep=';', header=None)
+
             if any(str(col).startswith("Unnamed") for col in df.columns):
-                st.warning("Unnamed columns detected, attempting to fix headers...")
-                new_headers = df.iloc[0]
+                df.columns = df.iloc[0]
                 df = df[1:].reset_index(drop=True)
-                df.columns = new_headers
 
             df.columns = df.columns.astype(str).str.strip()
 
-            # Treat '-', '_', and blank strings as missing
-            df.replace(['-', '_', ' '], np.nan, inplace=True)
+            # Drop rows with any NaN, '-' or '_'
+            def is_invalid(row):
+                return any(pd.isna(val) or str(val).strip() in ['-', '_'] for val in row)
 
-            # Drop rows with any missing data
-            initial_rows = len(df)
-            df.dropna(how='any', inplace=True)
-            rows_dropped_empty = initial_rows - len(df)
-            if rows_dropped_empty > 0:
-                st.write(f"Dropped {rows_dropped_empty} rows with missing or junk values.")
+            initial_len = len(df)
+            df = df[~df.apply(is_invalid, axis=1)].reset_index(drop=True)
+            st.write(f"🧹 Dropped {initial_len - len(df)} rows with NaN or junk values (-, _)!")
 
-            # Drop duplicate rows
-            initial_rows = len(df)
-            df = df[~df.duplicated(keep='first')].reset_index(drop=True)
-            rows_dropped_duplicates = initial_rows - len(df)
-            if rows_dropped_duplicates > 0:
-                st.write(f"Dropped {rows_dropped_duplicates} duplicate rows.")
+            # Drop duplicates
+            initial_len = len(df)
+            df = df[~df.duplicated()].reset_index(drop=True)
+            st.write(f"🧹 Dropped {initial_len - len(df)} duplicate rows.")
 
-            # Rename dimension columns
-            unit_cols = {
+            # Rename units
+            rename_cols = {
                 "Length": "Length (mm)",
                 "Width": "Width (mm)",
                 "Height": "Height (mm)",
                 "Weight": "Weight (g)"
             }
-            for old, new in unit_cols.items():
-                if old in df.columns:
-                    df.rename(columns={old: new}, inplace=True)
+            df.rename(columns=rename_cols, inplace=True)
 
-            # Improved conversion function
-            def convert_cm_to_mm(value):
-                try:
-                    value = str(value).lower().strip()
-                    if "cm" in value:
-                        return float(value.replace("cm", "").strip()) * 10
-                    elif "mm" in value:
-                        return float(value.replace("mm", "").strip())
-                    else:
-                        # Assume mm if unit is not given
-                        return float(value)
-                except:
-                    return np.nan
-
-            # Apply conversion to applicable columns
-            for col in ["Length (mm)", "Width (mm)", "Height (mm)"]:
+            # Convert to mm
+            dim_cols = ["Length (mm)", "Width (mm)", "Height (mm)"]
+            for col in dim_cols:
                 if col in df.columns:
-                    df[col] = df[col].apply(convert_cm_to_mm)
+                    def convert(val):
+                        val = str(val).lower().strip()
+                        if "cm" in val:
+                            return float(val.replace("cm", "")) * 10
+                        elif "mm" in val:
+                            return float(val.replace("mm", ""))
+                        return float(val)
+                    df[col] = pd.to_numeric(df[col].apply(convert), errors='coerce')
 
-            st.subheader("Cleaned & Final Table:")
-            st.dataframe(df)
+            df.dropna(subset=dim_cols, inplace=True)
+
+            # Compute Volume & Size Category
+            df['Volume (mm^3)'] = df['Length (mm)'] * df['Width (mm)'] * df['Height (mm)']
+            bins = [0, 100000, 150000, float('inf')]
+            labels = ['Small', 'Medium', 'Large']
+            df['Size Category'] = pd.cut(df['Volume (mm^3)'], bins=bins, labels=labels, right=False)
+            df['Height'] = df['Volume (mm^3)'].round().astype(int).astype(str) + ' (' + df['Size Category'].astype(str) + ')'
+
+            # Drop volume/dimension cols
+            df.drop(columns=dim_cols + ['Volume (mm^3)', 'Size Category'], inplace=True)
+
+            # Reorder 'Height' after 'Weight (g)'
+            if 'Height' in df.columns and 'Weight (g)' in df.columns:
+                cols = df.columns.tolist()
+                h = cols.pop(cols.index('Height'))
+                i = cols.index('Weight (g)')
+                cols.insert(i + 1, h)
+                df = df[cols]
+
+            # Filter UI (visual only)
+            with st.expander("🔍 Optional Filter UI", expanded=True):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if 'Brand' in df.columns:
+                        st.multiselect("Brand", df['Brand'].dropna().unique())
+                    st.selectbox("Mouse Type", ["", "Gaming", "Normal", "Design/Edit"])
+                    st.radio("Subtype", ["Casual", "Hard-core"], horizontal=True)
+                    st.selectbox("Sensor Technology", ["Optical", "Laser", "Hybrid"])
+
+                with col2:
+                    st.selectbox("Hand Compatibility", ["Right", "Left", "Ambidextrous"])
+                    st.slider("Side Buttons", 2, 10, 2)
+                    st.slider("Middle Buttons", 0, 3, 0)
+                    st.slider("DPI Range", 400, 32000, (800, 1600))
+                    st.selectbox("Polling Rate", [125, 500, 1000, 4000, 8000])
+
+            # Final display
+            st.subheader("🧾 Final Cleaned Table")
+            st.dataframe(df.reset_index(drop=True), use_container_width=True)
 
     except Exception as e:
-        st.error(f"An error occurred during file processing: {e}")
+        st.error(f"❌ An error occurred during processing: {e}")
